@@ -33,14 +33,11 @@ async fn main() -> Result<()> {
     let opt = Opt::from_args();
     dotenv::dotenv().ok();
 
-    let token = env::var("GITHUB_TOKEN").context("GITHUB_TOKEN environment variable missing")?;
-
     let mut handles = vec![];
 
-    for mut repo in get_repos(&opt.user, &token).await? {
-        let token = token.clone();
+    for mut repo in get_repos(&opt.user).await? {
         let handle = task::spawn(async move {
-            let lang = get_language(&repo.languages_url, &token)
+            let lang = get_language(&repo.languages_url)
                 .await
                 .unwrap_or("other".to_string())
                 .to_ascii_lowercase()
@@ -98,41 +95,45 @@ async fn clone_repo(repo: Repo) -> Result<()> {
     Ok(())
 }
 
-async fn get_repos(user: &str, token: &str) -> Result<Vec<Repo>> {
+fn build_request(method: reqwest::Method, url: &str) -> Result<reqwest::RequestBuilder> {
     let client = reqwest::Client::new();
+    let token = env::var("GITHUB_TOKEN").context("'GITHUB_TOKEN' environment variable missing")?;
 
-    println!("Getting repos {}:", user);
-    let repos = client
-        .request(
-            reqwest::Method::GET,
-            &format!("https://api.github.com/users/{}/repos", user),
-        )
+    let rb = client
+        .request(method, url)
         .header("Accept", "application/vnd.github.v3+json")
         .header("User-Agent", "rust")
-        .header("Authorization", format!("token {}", token))
-        .send()
-        .await?
-        .json::<Vec<Repo>>()
-        .await?;
-    Ok(repos)
+        .header("Authorization", format!("token {}", token));
+    Ok(rb)
 }
 
-async fn get_language(url: &str, token: &str) -> Result<String> {
-    let client = reqwest::Client::new();
+async fn get_repos(user: &str) -> Result<Vec<Repo>> {
+    println!("Getting repos {}:", user);
+    let resp = build_request(
+        reqwest::Method::GET,
+        &format!("https://api.github.com/users/{}/repos", user),
+    )?
+    .send()
+    .await?;
 
-    let langs = client
-        .request(reqwest::Method::GET, url)
-        .header("Accept", "application/vnd.github.v3+json")
-        .header("User-Agent", "rust")
-        .header("Authorization", format!("token {}", token))
-        .send()
-        .await?
-        .json::<HashMap<String, u32>>()
-        .await?;
+    if resp.status().is_success() {
+        Ok(resp.json::<Vec<Repo>>().await?)
+    } else {
+        anyhow::bail!("{}", resp.text().await?)
+    }
+}
 
-    let (lang, _) = langs
-        .iter()
-        .max_by_key(|(_, v)| *v)
-        .ok_or_else(|| anyhow!("languages not found"))?;
-    Ok(lang.to_string())
+async fn get_language(url: &str) -> Result<String> {
+    let resp = build_request(reqwest::Method::GET, url)?.send().await?;
+
+    if resp.status().is_success() {
+        let langs = resp.json::<HashMap<String, u32>>().await?;
+        let (lang, _) = langs
+            .iter()
+            .max_by_key(|(_, v)| *v)
+            .ok_or_else(|| anyhow!("languages not found"))?;
+        Ok(lang.to_string())
+    } else {
+        anyhow::bail!("{}", resp.text().await?)
+    }
 }
